@@ -277,6 +277,26 @@ const viewDetail = (record) => {
 }
 
 const confirmBooking = (record) => {
+  const validateResult = draftsApi.validateDraftCapacity(record.id)
+  if (validateResult.success && !validateResult.isValid) {
+    const { realtime, draft } = validateResult
+    if (realtime.remaining <= 0) {
+      ElMessageBox.alert(
+        `场次「${draft.sessionName}」${draft.date} ${draft.startTime} 已满员，无法确认此预约。`,
+        '场次已满员',
+        { confirmButtonText: '知道了', type: 'warning' }
+      )
+      return
+    } else {
+      ElMessageBox.alert(
+        `该场次名额已发生变化，剩余${realtime.remaining}个名额，该草稿预约${draft.peopleCount}人，无法确认。`,
+        '名额不足',
+        { confirmButtonText: '知道了', type: 'warning' }
+      )
+      return
+    }
+  }
+
   ElMessageBox.confirm(
     `确定要确认此预约吗？\n${record.name} - ${record.sessionName} ${record.date} ${record.startTime}`,
     '确认预约',
@@ -286,13 +306,26 @@ const confirmBooking = (record) => {
       type: 'warning'
     }
   ).then(() => {
-    const result = draftsApi.submit(record.id)
+    const result = draftsApi.submitAtomic(record.id)
     if (result.success) {
-      sessionsApi.updateBookedCount(record.sessionId, record.peopleCount)
       ElMessage.success('预约已确认')
       loadData()
     } else {
-      ElMessage.error(result.message)
+      if (result.error === 'full') {
+        ElMessageBox.alert(
+          result.message,
+          '场次已满员',
+          { confirmButtonText: '知道了', type: 'error' }
+        )
+      } else if (result.error === 'insufficient') {
+        ElMessageBox.alert(
+          result.message,
+          '名额不足',
+          { confirmButtonText: '知道了', type: 'warning' }
+        )
+      } else {
+        ElMessage.error(result.message)
+      }
     }
   }).catch(() => {})
 }

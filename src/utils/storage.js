@@ -322,6 +322,36 @@ const sessionsApi = {
   getByDate(date) {
     return this.getAll().filter(s => s.date === date)
   },
+  getRemainingCapacity(sessionId) {
+    const session = this.getById(sessionId)
+    if (!session) return { available: false, remaining: 0, capacity: 0, bookedCount: 0 }
+    return {
+      available: session.bookedCount < session.capacity,
+      remaining: session.capacity - session.bookedCount,
+      capacity: session.capacity,
+      bookedCount: session.bookedCount
+    }
+  },
+  validateCapacity(sessionId, peopleCount) {
+    const capacity = this.getRemainingCapacity(sessionId)
+    if (!capacity.available && capacity.remaining === 0) {
+      return {
+        success: false,
+        error: 'full',
+        message: '该场次已满员',
+        capacity
+      }
+    }
+    if (peopleCount > capacity.remaining) {
+      return {
+        success: false,
+        error: 'insufficient',
+        message: `名额不足，剩余${capacity.remaining}个名额，您选择了${peopleCount}人`,
+        capacity
+      }
+    }
+    return { success: true, capacity }
+  },
   updateBookedCount(sessionId, count) {
     const sessions = this.getAll()
     const session = sessions.find(s => s.id === sessionId)
@@ -377,22 +407,149 @@ const draftsApi = {
   submit(id) {
     const drafts = this.getAll()
     const draft = drafts.find(d => d.id === id)
-    if (draft) {
-      draft.status = 'confirmed'
-      draft.confirmedAt = new Date().toISOString()
-      storage.set(STORAGE_KEYS.DRAFTS, drafts)
-
-      const bookings = storage.get(STORAGE_KEYS.BOOKINGS, [])
-      bookings.push({
-        id: generateId(),
-        ...draft,
-        bookingDate: new Date().toISOString()
-      })
-      storage.set(STORAGE_KEYS.BOOKINGS, bookings)
-
-      return { success: true, data: draft }
+    if (!draft) {
+      return { success: false, message: '草稿不存在' }
     }
-    return { success: false, message: '草稿不存在' }
+    if (draft.status !== 'draft') {
+      return { success: false, message: '草稿状态不正确，无法确认' }
+    }
+
+    const capacityValidation = sessionsApi.validateCapacity(draft.sessionId, draft.peopleCount)
+    if (!capacityValidation.success) {
+      return {
+        success: false,
+        message: capacityValidation.message,
+        error: capacityValidation.error,
+        capacity: capacityValidation.capacity
+      }
+    }
+
+    sessionsApi.updateBookedCount(draft.sessionId, draft.peopleCount)
+
+    draft.status = 'confirmed'
+    draft.confirmedAt = new Date().toISOString()
+    storage.set(STORAGE_KEYS.DRAFTS, drafts)
+
+    const bookings = storage.get(STORAGE_KEYS.BOOKINGS, [])
+    bookings.push({
+      id: generateId(),
+      ...draft,
+      bookingDate: new Date().toISOString()
+    })
+    storage.set(STORAGE_KEYS.BOOKINGS, bookings)
+
+    return { 
+      success: true, 
+      data: draft,
+      capacity: capacityValidation.capacity
+    }
+  },
+  submitAtomic(id) {
+    const drafts = this.getAll()
+    const draft = drafts.find(d => d.id === id)
+    if (!draft) {
+      return { success: false, message: '草稿不存在' }
+    }
+    if (draft.status !== 'draft') {
+      return { success: false, message: '草稿状态不正确，无法确认' }
+    }
+
+    const currentSession = sessionsApi.getById(draft.sessionId)
+    if (!currentSession) {
+      return { success: false, message: '场次不存在或已取消' }
+    }
+
+    const realtimeRemaining = currentSession.capacity - currentSession.bookedCount
+    if (realtimeRemaining <= 0) {
+      return {
+        success: false,
+        error: 'full',
+        message: `场次「${currentSession.exhibitName}」${currentSession.date} ${currentSession.startTime} 已满员，请重新选择场次`,
+        capacity: {
+          remaining: 0,
+          capacity: currentSession.capacity,
+          bookedCount: currentSession.bookedCount,
+          draftPeopleCount: draft.peopleCount
+        }
+      }
+    }
+
+    if (draft.peopleCount > realtimeRemaining) {
+      return {
+        success: false,
+        error: 'insufficient',
+        message: `名额不足，该场次剩余${realtimeRemaining}个名额，您的草稿预约${draft.peopleCount}人，请减少人数或选择其他场次`,
+        capacity: {
+          remaining: realtimeRemaining,
+          capacity: currentSession.capacity,
+          bookedCount: currentSession.bookedCount,
+          draftPeopleCount: draft.peopleCount
+        }
+      }
+    }
+
+    const sessions = sessionsApi.getAll()
+    const sessionIndex = sessions.findIndex(s => s.id === draft.sessionId)
+    if (sessionIndex !== -1) {
+      sessions[sessionIndex].bookedCount += draft.peopleCount
+      sessions[sessionIndex].status = sessions[sessionIndex].bookedCount >= sessions[sessionIndex].capacity ? 'full' : 'available'
+      storage.set(STORAGE_KEYS.SESSIONS, sessions)
+    }
+
+    const draftIndex = drafts.findIndex(d => d.id === id)
+    drafts[draftIndex].status = 'confirmed'
+    drafts[draftIndex].confirmedAt = new Date().toISOString()
+    storage.set(STORAGE_KEYS.DRAFTS, drafts)
+
+    const bookings = storage.get(STORAGE_KEYS.BOOKINGS, [])
+    bookings.push({
+      id: generateId(),
+      ...drafts[draftIndex],
+      bookingDate: new Date().toISOString()
+    })
+    storage.set(STORAGE_KEYS.BOOKINGS, bookings)
+
+    return { 
+      success: true, 
+      data: drafts[draftIndex],
+      capacity: {
+        remaining: currentSession.capacity - (currentSession.bookedCount + draft.peopleCount),
+        capacity: currentSession.capacity,
+        bookedCount: currentSession.bookedCount + draft.peopleCount
+      }
+    }
+  },
+  validateDraftCapacity(draftId) {
+    const draft = this.getAll().find(d => d.id === draftId)
+    if (!draft) {
+      return { success: false, message: '草稿不存在' }
+    }
+
+    const currentSession = sessionsApi.getById(draft.sessionId)
+    if (!currentSession) {
+      return { success: false, message: '场次不存在' }
+    }
+
+    const realtimeRemaining = currentSession.capacity - currentSession.bookedCount
+    const hasChanged = draft.peopleCount > realtimeRemaining || realtimeRemaining <= 0
+
+    return {
+      success: true,
+      isValid: draft.peopleCount <= realtimeRemaining && realtimeRemaining > 0,
+      hasChanged,
+      draft: {
+        peopleCount: draft.peopleCount,
+        sessionId: draft.sessionId,
+        sessionName: draft.sessionName,
+        date: draft.date,
+        startTime: draft.startTime
+      },
+      realtime: {
+        remaining: realtimeRemaining,
+        capacity: currentSession.capacity,
+        bookedCount: currentSession.bookedCount
+      }
+    }
   },
   cancel(id) {
     const drafts = this.getAll()

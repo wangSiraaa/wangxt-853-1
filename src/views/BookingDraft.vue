@@ -346,24 +346,60 @@ const saveEdit = async () => {
 }
 
 const confirmDraft = (draft) => {
-  const session = sessionsApi.getById(draft.sessionId)
-  if (session && sessionsApi.isFull(draft.sessionId)) {
-    ElMessage.error('抱歉，该场次已满员')
-    return
+  const validateResult = draftsApi.validateDraftCapacity(draft.id)
+  if (validateResult.success && !validateResult.isValid) {
+    const { realtime, draft: draftInfo } = validateResult
+    if (realtime.remaining <= 0) {
+      ElMessageBox.alert(
+        `场次「${draftInfo.sessionName}」${draftInfo.date} ${draftInfo.startTime} 已满员，请重新选择场次。`,
+        '名额不足',
+        { confirmButtonText: '知道了', type: 'warning' }
+      )
+      return
+    } else {
+      ElMessageBox.alert(
+        `该场次名额已发生变化，剩余${realtime.remaining}个名额，您的草稿预约${draftInfo.peopleCount}人。请减少人数或选择其他场次。`,
+        '名额不足',
+        { confirmButtonText: '知道了', type: 'warning' }
+      )
+      return
+    }
   }
   editingDraft.value = { ...draft }
   showConfirmDialog.value = true
 }
 
 const submitConfirm = () => {
-  const result = draftsApi.submit(editingDraft.value.id)
+  const result = draftsApi.submitAtomic(editingDraft.value.id)
   if (result.success) {
-    sessionsApi.updateBookedCount(editingDraft.value.sessionId, editingDraft.value.peopleCount)
     ElMessage.success('预约确认成功！')
     showConfirmDialog.value = false
     activeTab.value = 'history'
   } else {
-    ElMessage.error(result.message)
+    if (result.error === 'full') {
+      ElMessageBox.alert(
+        result.message,
+        '场次已满员',
+        { confirmButtonText: '重新选择', type: 'error' }
+      ).then(() => {
+        showConfirmDialog.value = false
+      })
+    } else if (result.error === 'insufficient') {
+      ElMessageBox.confirm(
+        `${result.message}\n是否修改预约人数？`,
+        '名额不足',
+        {
+          confirmButtonText: '修改人数',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      ).then(() => {
+        showConfirmDialog.value = false
+        editDraft(editingDraft.value)
+      }).catch(() => {})
+    } else {
+      ElMessage.error(result.message)
+    }
   }
 }
 
