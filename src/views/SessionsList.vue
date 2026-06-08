@@ -170,7 +170,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { 
   sessionsApi, 
   exhibitsApi, 
-  draftsApi, 
+  draftsApi,
+  tempFormApi,
   validatePhone, 
   getTodayStr 
 } from '@/utils/storage'
@@ -265,25 +266,69 @@ const viewDetail = (id) => {
   router.push(`/session/${id}`)
 }
 
-const handleBook = (session) => {
+const handleBook = async (session) => {
   if (session.status === 'full') {
     ElMessage.warning('该场次已满员，无法预约')
     return
   }
   selectedSession.value = session
-  bookForm.value = {
-    phone: '',
-    peopleCount: 1,
-    name: '',
-    remark: ''
+  
+  const savedForm = tempFormApi.get(session.id)
+  if (savedForm) {
+    try {
+      await ElMessageBox.confirm(
+        `检测到您在「${session.exhibitName}」${session.date} ${session.startTime} 场次有未完成的预约输入，是否恢复？`,
+        '恢复草稿',
+        {
+          confirmButtonText: '恢复输入',
+          cancelButtonText: '重新填写',
+          type: 'info'
+        }
+      )
+      bookForm.value = {
+        phone: savedForm.phone || '',
+        peopleCount: savedForm.peopleCount || 1,
+        name: savedForm.name || '',
+        remark: savedForm.remark || ''
+      }
+    } catch {
+      bookForm.value = {
+        phone: '',
+        peopleCount: 1,
+        name: '',
+        remark: ''
+      }
+      tempFormApi.remove(session.id)
+    }
+  } else {
+    bookForm.value = {
+      phone: '',
+      peopleCount: 1,
+      name: '',
+      remark: ''
+    }
   }
   showBookDialog.value = true
+}
+
+const saveTempForm = () => {
+  if (selectedSession.value) {
+    tempFormApi.save(selectedSession.value.id, { ...bookForm.value })
+  }
 }
 
 const submitBooking = async () => {
   if (!bookFormRef.value) return
   
-  await bookFormRef.value.validate()
+  try {
+    await bookFormRef.value.validate()
+  } catch (e) {
+    saveTempForm()
+    ElMessage.warning('请完善表单信息后再提交，已自动保存您的输入')
+    return
+  }
+  
+  saveTempForm()
   
   const hasConflict = draftsApi.checkPhoneAndDateConflict(
     bookForm.value.phone,
@@ -291,15 +336,16 @@ const submitBooking = async () => {
   )
   
   if (hasConflict) {
-    ElMessageBox.confirm(
-      '该手机号当日已有预约草稿，是否继续？继续将覆盖原有草稿。',
-      '提示',
-      {
-        confirmButtonText: '继续预约',
-        cancelButtonText: '取消',
-        type: 'warning'
-      }
-    ).then(() => {
+    try {
+      await ElMessageBox.confirm(
+        '该手机号当日已有预约草稿，是否继续？继续将覆盖原有草稿。',
+        '提示',
+        {
+          confirmButtonText: '继续预约',
+          cancelButtonText: '取消',
+          type: 'warning'
+        }
+      )
       const existingDraft = draftsApi.getByPhoneAndDate(
         bookForm.value.phone,
         selectedSession.value.date
@@ -307,15 +353,19 @@ const submitBooking = async () => {
       if (existingDraft) {
         draftsApi.delete(existingDraft.id)
       }
-      createDraft()
-    }).catch(() => {})
+      await createDraft()
+    } catch (e) {
+      if (e !== 'cancel') {
+        saveTempForm()
+      }
+    }
     return
   }
   
-  createDraft()
+  await createDraft()
 }
 
-const createDraft = () => {
+const createDraft = async () => {
   const draftData = {
     phone: bookForm.value.phone,
     name: bookForm.value.name,
@@ -334,13 +384,60 @@ const createDraft = () => {
   const result = draftsApi.create(draftData)
   
   if (result.success) {
+    tempFormApi.remove(selectedSession.value.id)
     ElMessage.success('预约草稿已保存，请到"我的预约"中确认')
     showBookDialog.value = false
     loadData()
   } else {
-    ElMessage.error(result.message)
+    saveTempForm()
+    
+    let errorMsg = result.message
+    let errorTitle = '预约失败'
+    let showDetail = false
+    let detailContent = ''
+    
+    if (result.error === 'full') {
+      errorTitle = '场次已满员'
+      detailContent = `「${result.session?.exhibitName}」${result.session?.date} ${result.session?.startTime} 场次已无剩余名额，建议选择其他场次。`
+      showDetail = true
+    } else if (result.error === 'insufficient') {
+      errorTitle = '名额不足'
+      const remaining = result.capacity?.remaining ?? 0
+      detailContent = `该场次仅剩 ${remaining} 个名额，请调整预约人数或选择其他场次。`
+      showDetail = true
+    } else if (result.error === 'conflict') {
+      errorTitle = '存在冲突草稿'
+      detailContent = `您在 ${result.existingDraft?.date} 已有一个预约草稿，请先完成或取消该草稿后再预约。`
+      showDetail = true
+    } else if (result.error === 'invalid_session') {
+      errorTitle = '场次无效'
+      detailContent = '该场次可能已被取消，请返回列表重新选择。'
+      showDetail = true
+    }
+    
+    if (showDetail) {
+      try {
+        await ElMessageBox.alert(
+          `${errorMsg}\n\n${detailContent}\n\n已自动保存您的输入，您可以修改后重新提交。`,
+          errorTitle,
+          {
+            confirmButtonText: '知道了',
+            type: 'error',
+            dangerouslyUseHTMLString: false
+          }
+        )
+      } catch (e) {}
+    } else {
+      ElMessage.error(`${errorMsg}（已自动保存您的输入）`)
+    }
   }
 }
+
+watch(bookForm, () => {
+  if (showBookDialog.value && selectedSession.value) {
+    saveTempForm()
+  }
+}, { deep: true })
 </script>
 
 <style scoped>

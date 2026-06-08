@@ -4,7 +4,8 @@ const STORAGE_KEYS = {
   TIME_SLOTS: 'planetarium_time_slots',
   DRAFTS: 'planetarium_drafts',
   GUIDE_LISTS: 'planetarium_guide_lists',
-  BOOKINGS: 'planetarium_bookings'
+  BOOKINGS: 'planetarium_bookings',
+  TEMP_FORM: 'planetarium_temp_form'
 }
 
 const generateId = () => {
@@ -376,9 +377,39 @@ const draftsApi = {
     return this.getAll().find(d => d.phone === phone && d.date === date && d.status === 'draft')
   },
   create(draftData) {
+    const session = sessionsApi.getById(draftData.sessionId)
+    if (!session) {
+      return { success: false, message: '场次不存在或已取消', error: 'invalid_session' }
+    }
+
+    if (sessionsApi.isFull(draftData.sessionId)) {
+      return {
+        success: false,
+        message: `场次「${session.exhibitName}」${session.date} ${session.startTime} 已满员，无法预约`,
+        error: 'full',
+        session
+      }
+    }
+
+    const capacityValidation = sessionsApi.validateCapacity(draftData.sessionId, draftData.peopleCount)
+    if (!capacityValidation.success) {
+      return {
+        success: false,
+        message: capacityValidation.message,
+        error: capacityValidation.error,
+        session,
+        capacity: capacityValidation.capacity
+      }
+    }
+
     const existing = this.getByPhoneAndDate(draftData.phone, draftData.date)
     if (existing) {
-      return { success: false, message: '该手机号当日已有预约草稿，请先完成或取消现有预约' }
+      return {
+        success: false,
+        message: '该手机号当日已有预约草稿，请先完成或取消现有预约',
+        error: 'conflict',
+        existingDraft: existing
+      }
     }
 
     const draft = {
@@ -639,6 +670,36 @@ const bookingsApi = {
   }
 }
 
+const tempFormApi = {
+  save(sessionId, formData) {
+    const tempForms = storage.get(STORAGE_KEYS.TEMP_FORM, {})
+    tempForms[sessionId] = {
+      ...formData,
+      savedAt: new Date().toISOString(),
+      sessionId
+    }
+    storage.set(STORAGE_KEYS.TEMP_FORM, tempForms)
+    return { success: true }
+  },
+  get(sessionId) {
+    const tempForms = storage.get(STORAGE_KEYS.TEMP_FORM, {})
+    return tempForms[sessionId] || null
+  },
+  remove(sessionId) {
+    const tempForms = storage.get(STORAGE_KEYS.TEMP_FORM, {})
+    delete tempForms[sessionId]
+    storage.set(STORAGE_KEYS.TEMP_FORM, tempForms)
+    return { success: true }
+  },
+  clear() {
+    storage.remove(STORAGE_KEYS.TEMP_FORM)
+    return { success: true }
+  },
+  getAll() {
+    return storage.get(STORAGE_KEYS.TEMP_FORM, {})
+  }
+}
+
 initDefaultData()
 
 export {
@@ -653,5 +714,6 @@ export {
   draftsApi,
   timeSlotsApi,
   guideListsApi,
-  bookingsApi
+  bookingsApi,
+  tempFormApi
 }
